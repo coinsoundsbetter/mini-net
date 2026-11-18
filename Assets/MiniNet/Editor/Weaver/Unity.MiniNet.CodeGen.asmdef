@@ -1,0 +1,7 @@
+{
+    "name": "Unity.MiniNet.CodeGen",
+    "includePlatforms": ["Editor"],
+    "overrideReferences": true,
+    "precompiledReferences": ["MiniNet.Cecil.dll"],
+    "autoReferenced": false
+}
