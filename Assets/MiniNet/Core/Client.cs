@@ -1,4 +1,5 @@
 using System;
+using MiniNet.Replicate;
 
 namespace MiniNet {
     public class Client {
@@ -9,6 +10,8 @@ namespace MiniNet {
         public event Action<ArraySegment<byte>, DeliveryMode> DataReceived;
         public event Action OnDisconnected;
         public event Action<string> Error;
+
+        public ClientReplicateManager ReplicateManager { get; private set; } = new ClientReplicateManager();
 
         public ClientState State { get; private set; }
 

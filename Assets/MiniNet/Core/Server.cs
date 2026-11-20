@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using MiniNet.Replicate;
 
 namespace MiniNet {
     public class Server {
@@ -11,6 +12,7 @@ namespace MiniNet {
         public event Action<int, ArraySegment<byte>, DeliveryMode> DataReceived;
         public event Action<int, string> Error;
         public ServerState State { get; private set; }
+        public ServerReplicateManager ReplicateManager { get; private set; } = new ServerReplicateManager();
 
         public Server(TransportServer useTransport) {
             transport = useTransport ?? throw new ArgumentNullException(nameof(useTransport));
