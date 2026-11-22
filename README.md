@@ -1,39 +1,39 @@
 # MiniNet
 
-MiniNet 是一个基于 KCP 的 C# 多人游戏网络框架，提供客户端与服务端连接、类型化消息和服务端权威的对象状态同步。运行时可由普通 .NET 程序或 Unity 驱动。
+MiniNet 是轻量的 C# 多人游戏网络框架，基于 KCP，支持类型化消息和服务端权威的对象复制。网络对象用 C# 模板定义，无需配置 Unity Prefab。网络循环由你驱动，收包、游戏逻辑和发送的先后顺序直接体现在代码里。
 
-Unity 依赖集中在编译期的 **Weaver**：它接入 Unity 编译管线，为消息和同步字段自动生成序列化代码。在普通 .NET 项目中直接编译源码时，也可以手动注册消息序列化器、实现组件读写。详见[编译与序列化](Assets/MiniNet/README.md#编译与序列化)。
+运行时可以独立于 Unity。开发者或 Coding Agent 可以直接在代码中接入两端，在普通 .NET 测试进程里驱动它们并断言结果。下面四个例子共用同一对服务端和客户端，引用 `MiniNet` 和 `MiniNet.Replicate`。消息和字段示例使用 Unity 编译期 **Weaver** 生成的序列化代码。普通 .NET 项目直接编译源码时，需要手动注册消息读写函数并实现组件序列化。[编译与序列化](Assets/MiniNet/README.md#编译与序列化)
 
-## 功能
+## 1. 启动服务端和客户端，打印连接日志
 
-| 功能 | 支持的操作 |
-| --- | --- |
-| 连接管理 | 服务端监听和断开指定连接，客户端连接和断开，双方接收连接状态与错误事件。 |
-| 消息收发 | 定义结构体消息并按类型注册回调，也可以直接发送字节。支持可靠和不可靠两种投递方式。 |
-| 对象同步 | 用模板定义网络对象（Ghost），在服务端创建、更新和销毁。客户端首次收到完整状态，后续接收变化。 |
-| 字段同步 | 用 `[GhostField]` 标记字段，Weaver 在编译时生成序列化和变化检测代码。客户端可监听创建、更新和移除事件。 |
-| 可见性与子对象 | 按连接筛选接收方。子 Ghost 继承父级可见范围，还可以进一步限制自己的接收方。 |
-| 所有权 | 指定或转移对象的所有者，处理客户端请求时可按发送者校验对象归属。 |
-
-## 基本用法
-
-引用命名空间 `MiniNet` 和 `MiniNet.Replicate`。如果业务脚本使用 asmdef，添加对 `MiniNet` 程序集的引用。
-
-### 1. 建立连接
-
-服务端和客户端分别初始化，在各自的更新循环中驱动网络。下面用本机地址演示。
+以本机双端为例。先订阅事件，再监听和连接。后续示例中的处理器、模板和事件订阅也放在开始收包之前。
 
 ```csharp
 var server = new Server(new TransportServer());
-server.Listen(7777);
-
 var client = new Client(new TransportClient());
+
+server.RemoteClientConnected += id => System.Console.WriteLine($"服务端：玩家 {id} 已连接");
+client.OnConnected += () => System.Console.WriteLine("客户端：已连上服务端");
+
+server.Listen(7777);
 client.Connect("127.0.0.1", 7777);
 ```
 
-每帧先调用本端的 `TickIncoming()`，处理游戏逻辑后调用 `TickOutgoing()`。退出时，客户端调用 `Disconnect()`，服务端调用 `Shutdown()`。
+在宿主的更新循环里反复执行下面四行，连接建立后，两端各打印一条日志。分进程部署时，每端只驱动自己的实例。
 
-### 2. 发送和接收消息
+```csharp
+server.TickIncoming();
+client.TickIncoming();
+// 在这里处理本轮游戏逻辑。
+server.TickOutgoing();
+client.TickOutgoing();
+```
+
+退出时调用 `client.Disconnect()` 和 `server.Shutdown()`。
+
+## 2. 客户端发消息，服务端回复
+
+两端共享消息定义。服务端处理器收到的 `sender` 就是发送者的连接 ID，可以直接用它回复该客户端。
 
 ```csharp
 public struct ChatMessage : INetworkMessage {
@@ -42,15 +42,20 @@ public struct ChatMessage : INetworkMessage {
 ```
 
 ```csharp
-// 服务端：在开始收包前注册处理器。sender 是发送者的连接 ID。
-server.RegisterHandler<ChatMessage>((sender, msg, mode) =>
-    System.Console.WriteLine($"[{sender}] {msg.Text}"));
+server.RegisterHandler<ChatMessage>((sender, msg, mode) => {
+    System.Console.WriteLine($"玩家 {sender} 说：{msg.Text}");
+    server.Send(sender, new ChatMessage { Text = "收到：" + msg.Text });
+});
 
-// 客户端：连接成功后发送，默认可靠投递。
-client.Send(new ChatMessage { Text = "你好" });
+client.RegisterHandler<ChatMessage>((msg, mode) => System.Console.WriteLine(msg.Text));
+client.OnConnected += () => client.Send(new ChatMessage { Text = "你好" });
 ```
 
-### 3. 同步对象状态
+保持示例 1 的循环运行，客户端会打印「收到：你好」。
+
+## 3. 修改服务端血量，客户端自动同步
+
+把血量放进 `GhostComponent`，用 `[GhostField]` 标出同步字段。两端用相同的模板 ID 和组件顺序构建模板。
 
 ```csharp
 public sealed class PlayerState : GhostComponent {
@@ -59,21 +64,59 @@ public sealed class PlayerState : GhostComponent {
 ```
 
 ```csharp
-// 两端使用相同的模板 ID 和组件布局。
 var playerTemplate = new GhostBuilder(1).Component<PlayerState>().Build();
-
-// 客户端：在收包前注册模板。
 client.ReplicateManager.RegisterTemplate(playerTemplate);
 
-// 服务端：创建对象，之后直接修改同步字段。
+void LogHp(Ghost ghost) {
+    if (ghost.TryGetComponent<PlayerState>(out var state))
+        System.Console.WriteLine($"玩家 {ghost.NetId} 的血量：{state.Hp}");
+}
+client.ReplicateManager.Spawned += LogHp;
+client.ReplicateManager.Updated += LogHp;
+
 var player = server.ReplicateManager.Spawn(playerTemplate);
 player.GetComponent<PlayerState>().Hp = 100;
 ```
 
-客户端可订阅 `Spawned`、`Updated` 和 `Despawned` 以更新游戏表现。服务端调用 `Despawn(player.NetId)` 后，框架会移除客户端对应的副本。
+客户端首次收到玩家时打印血量 100。稍后在服务端处理一次受伤：
+
+```csharp
+player.GetComponent<PlayerState>().Hp -= 10;
+```
+
+下一次服务端 `TickOutgoing()` 会采集变化，客户端收包后打印 90。业务代码只改字段，无需再定义或发送扣血消息。
+
+## 4. 让所有人看到玩家，只让队友看到战术目标
+
+玩家继续使用示例 3 的模板。把需要限制接收范围的字段放到独立的子 Ghost 上，就可以单独控制谁收到这部分数据。
+
+```csharp
+public sealed class TeamTactics : GhostComponent {
+    [GhostField] public int TargetId;
+}
+```
+
+```csharp
+var tacticsTemplate = new GhostBuilder(2).Component<TeamTactics>().Build();
+client.ReplicateManager.RegisterTemplate(tacticsTemplate); // 每个客户端在收包前注册
+
+var teammates = new System.Collections.Generic.HashSet<int>();
+var tactics = server.ReplicateManager.SpawnChild(player, tacticsTemplate,
+    visibleTo: teammates.Contains);
+tactics.GetComponent<TeamTactics>().TargetId = 42;
+```
+
+服务端在入队和退队事件中更新集合，`connectionId` 来自连接事件。
+
+```csharp
+teammates.Add(connectionId);    // 入队：下次同步时收到子对象及其当前目标
+// ... 玩家稍后退队 ...
+teammates.Remove(connectionId); // 退队：下次同步时移除该客户端上的子对象
+```
+
+子对象的接收方必须能看到父对象，同时通过 `visibleTo` 条件。队外玩家仍能看到父对象的血量，战术目标的创建和字段更新只发给可见的队友，从而减少下行流量。[双客户端范围同步测试](Assets/MiniNet/Tests/GhostBindingTests.cs)
 
 ## 文档与示例
 
-- [用户指南与 API 速查](Assets/MiniNet/README.md)包含可直接挂到 GameObject 上运行的本机通信示例。
-- [客户端发送请求](Assets/MiniNet/Examples/Inventory.Client.cs)和[服务端校验归属](Assets/MiniNet/Examples/Inventory.Server.cs)展示一次完整的业务交互。
-- [子对象与可见性测试](Assets/MiniNet/Tests/GhostBindingTests.cs)展示如何按连接同步部分状态。
+- [用户指南与 API 速查](Assets/MiniNet/README.md)
+- [客户端购买请求](Assets/MiniNet/Examples/Inventory.Client.cs)与[服务端归属校验](Assets/MiniNet/Examples/Inventory.Server.cs)
