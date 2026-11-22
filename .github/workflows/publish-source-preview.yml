@@ -1,0 +1,40 @@
+name: Publish MiniNet source preview
+on:
+  push:
+    branches: [codex/publish-source-preview-0.1]
+permissions:
+  contents: read
+  packages: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 9283599b12f8c4423ae0fc3f16fbdcb4ad6f4053
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://npm.pkg.github.com'
+          scope: '@coinsoundsbetter'
+      - name: Package tagged source and publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          stage="$(mktemp -d)"
+          git archive HEAD README.md README.en.md Assets/MiniNet | tar -x -C "$stage" --exclude='Assets/MiniNet/Temp' --exclude='Assets/MiniNet/Temp.meta' --exclude='Assets/MiniNet/obj.meta' --exclude='*.dll' --exclude='*.dll.meta'
+          cd "$stage"
+          cat > package.json <<'JSON'
+          {
+            "name": "@coinsoundsbetter/mini-net",
+            "version": "0.1.0-preview.1",
+            "description": "C# source distribution of MiniNet, a lightweight multiplayer networking framework.",
+            "repository": {"type": "git", "url": "git+https://github.com/coinsoundsbetter/mini-net.git"},
+            "publishConfig": {"registry": "https://npm.pkg.github.com"}
+          }
+          JSON
+          npm pack --dry-run --json > "$RUNNER_TEMP/manifest.json"
+          node -e "const f=require(process.env.RUNNER_TEMP+'/manifest.json')[0].files.map(x=>x.path); if (!f.includes('Assets/MiniNet/Core/Server.cs') || !f.includes('Assets/MiniNet/ThirdParty/Kcp2k/LICENSE.txt') || f.some(x=>/\.dll|\/Temp\/|\/obj\//i.test(x))) process.exit(1)"
+          npm publish --tag preview --ignore-scripts
