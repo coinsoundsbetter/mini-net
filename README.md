@@ -1,5 +1,7 @@
 <h1 align="center">MiniNet</h1>
 
+<p align="center"><strong>简体中文</strong> · <a href="README.en.md">English</a></p>
+
 <p align="center"><strong>轻量的 C# 多人游戏网络框架</strong><br>
 基于 KCP，支持类型化消息与服务端权威的对象复制。</p>
 
@@ -149,3 +151,19 @@ teammates.Remove(connectionId); // 退队：下次同步时移除该客户端上
 
 - [用户指南与 API 速查](Assets/MiniNet/README.md)
 - [客户端购买请求](Assets/MiniNet/Examples/Inventory.Client.cs)与[服务端归属校验](Assets/MiniNet/Examples/Inventory.Server.cs)
+
+## 与其他网络框架的不同之处
+
+以 Mirror 为例，两者都能同步玩家血量，也都能把战术目标只发给队友。接入时的差异主要在于对象如何定义、谁驱动网络循环，以及可见性规则写在哪里。
+
+| 接入时的问题 | MiniNet | Mirror |
+| --- | --- | --- |
+| 如何组织两端业务？ | MiniNet 没有统一的 `NetworkManager`。应用分别配置 `Client` 和 `Server`，鼓励从项目初期就分开编写两端业务，共享消息和状态定义。 | `NetworkManager` 提供客户端、服务端和主机模式的启动入口与生命周期回调。项目也可以分别组织两端业务。 |
+| 在哪里运行和测试？ | 在普通 .NET 进程中即可创建服务端和客户端并测试交互。直接编译源码时，需为类型化消息和同步组件提供序列化实现。 | 网络对象和行为基于 Unity 的 `MonoBehaviour`，端到端测试通常在 Unity 环境中驱动这些组件。 |
+| 如何定义一个有血量的玩家？ | 把带 `[GhostField]` 的组件加入 `GhostBuilder` 模板，用代码生成玩家，无需配置 Prefab。 | 在 GameObject 上使用 `NetworkIdentity`，在 `NetworkBehaviour` 中用 `[SyncVar]` 声明血量。动态生成对象通常使用已注册的 Prefab，也支持自定义生成函数。 |
+| 谁决定收发时机？ | 宿主显式调用 `TickIncoming()` 和 `TickOutgoing()`，可以把战斗结算放在两次调用之间。 | 框架将网络更新接入 Unity 的 `PlayerLoop`，默认随 Unity 更新循环收发。 |
+| 如何只向队友同步战术目标？ | 将目标放进子 Ghost，用 `visibleTo` 筛选连接。子对象继承父对象的可见范围，并可进一步缩小范围。 | 通过 Interest Management 决定每个 `NetworkIdentity` 的观察者，可选用内置队伍、距离策略或实现自定义策略。 |
+
+以购买药水为例，客户端发送请求，服务端校验背包归属和余额，再扣款并增加药水。修改购买按钮时，可以把 Coding Agent 的上下文限定为客户端实现和共享消息定义，服务端校验与结算逻辑留在独立文件中。[客户端购买请求](Assets/MiniNet/Examples/Inventory.Client.cs) · [服务端购买处理](Assets/MiniNet/Examples/Inventory.Server.cs)
+
+如果你希望开发者或 Coding Agent 在 C# 中完成接入，并在独立 .NET 进程里验证一轮收发，MiniNet 的代码模板和显式循环更贴合这条工作流。如果项目已经围绕 Unity 场景、Prefab 和组件组织，Mirror 可以沿用现有的对象结构。[Mirror 自定义生成函数](https://mirror-networking.gitbook.io/docs/manual/guides/gameobjects/custom-spawnfunctions) · [Mirror 兴趣管理](https://mirror-networking.gitbook.io/docs/manual/interest-management)
