@@ -1,37 +1,79 @@
 # MiniNet
 
-MiniNet 是面向 Unity 的轻量级、服务端权威网络框架，底层使用 KCP。客户端通过类型化消息提交操作，服务端通过 Ghost（可复制的游戏对象）把状态同步给指定玩家。例如，购买药水是一条消息，购买后的金币和库存是 Ghost 上的字段。
+MiniNet 是一个基于 KCP 的 C# 多人游戏网络框架，提供客户端与服务端连接、类型化消息和服务端权威的对象状态同步。运行时可由普通 .NET 程序或 Unity 驱动。
 
-[快速开始与 API 指南](Assets/MiniNet/README.md) · [业务示例](Assets/MiniNet/Examples) · [复制测试](Assets/MiniNet/Tests/GhostBindingTests.cs)
+Unity 依赖集中在编译期的 **Weaver**：它接入 Unity 编译管线，为消息和同步字段自动生成序列化代码。在普通 .NET 项目中直接编译源码时，也可以手动注册消息序列化器、实现组件读写。详见[编译与序列化](Assets/MiniNet/README.md#编译与序列化)。
 
-## 只向队友同步战术数据
+## 功能
 
-假设附近所有玩家都能看到角色，但只有队友能看到角色的战术目标。在服务端，把公开状态放在父 Ghost，把战术数据放在子 Ghost，并用队伍成员表控制子对象的可见性。
+| 功能 | 支持的操作 |
+| --- | --- |
+| 连接管理 | 服务端监听和断开指定连接，客户端连接和断开，双方接收连接状态与错误事件。 |
+| 消息收发 | 定义结构体消息并按类型注册回调，也可以直接发送字节。支持可靠和不可靠两种投递方式。 |
+| 对象同步 | 用模板定义网络对象（Ghost），在服务端创建、更新和销毁。客户端首次收到完整状态，后续接收变化。 |
+| 字段同步 | 用 `[GhostField]` 标记字段，Weaver 在编译时生成序列化和变化检测代码。客户端可监听创建、更新和移除事件。 |
+| 可见性与子对象 | 按连接筛选接收方。子 Ghost 继承父级可见范围，还可以进一步限制自己的接收方。 |
+| 所有权 | 指定或转移对象的所有者，处理客户端请求时可按发送者校验对象归属。 |
+
+## 基本用法
+
+引用命名空间 `MiniNet` 和 `MiniNet.Replicate`。如果业务脚本使用 asmdef，添加对 `MiniNet` 程序集的引用。
+
+### 1. 建立连接
+
+服务端和客户端分别初始化，在各自的更新循环中驱动网络。下面用本机地址演示。
 
 ```csharp
-var ghosts = server.ReplicateManager;
-var player = ghosts.Spawn(playerTemplate);
-var teammates = new HashSet<int>(); // 服务端连接 ID
-var tactics = ghosts.SpawnChild(player, tacticsTemplate, visibleTo: teammates.Contains);
+var server = new Server(new TransportServer());
+server.Listen(7777);
+
+var client = new Client(new TransportClient());
+client.Connect("127.0.0.1", 7777);
 ```
 
-玩家入队时调用 `teammates.Add(connectionId)`。如果该玩家能看到父对象，下一次同步就会收到战术数据的完整当前值。退队时调用 `teammates.Remove(connectionId)`，该客户端会移除战术数据，仍可继续接收公开的角色状态。
+每帧先调用本端的 `TickIncoming()`，处理游戏逻辑后调用 `TickOutgoing()`。退出时，客户端调用 `Disconnect()`，服务端调用 `Shutdown()`。
 
-## 在 Unity 中试用
+### 2. 发送和接收消息
 
-1. 使用 Unity Hub 打开仓库根目录。项目记录的编辑器版本是 `2022.3.57f1c2`。
-2. 将[快速开始里的脚本](Assets/MiniNet/README.md#快速开始本机收发一条消息)保存为 `MiniNetDemo.cs`，挂到场景中的 GameObject 上。如果脚本所在程序集使用 asmdef，添加对 `MiniNet` 的引用。
-3. 进入 Play 模式。示例会在本机启动服务端和客户端，连接成功后可在 Unity Console 看到服务端收到的“你好”。
+```csharp
+public struct ChatMessage : INetworkMessage {
+    public string Text;
+}
+```
 
-接入自己的游戏循环时，先调用 `TickIncoming()` 接收消息，再运行游戏逻辑，最后调用 `TickOutgoing()` 发送本帧的消息和状态变化。
+```csharp
+// 服务端：在开始收包前注册处理器。sender 是发送者的连接 ID。
+server.RegisterHandler<ChatMessage>((sender, msg, mode) =>
+    System.Console.WriteLine($"[{sender}] {msg.Text}"));
 
-## 从示例查 API
+// 客户端：连接成功后发送，默认可靠投递。
+client.Send(new ChatMessage { Text = "你好" });
+```
 
-| 想做什么 | 从哪里看 |
-| --- | --- |
-| 定义消息、注册处理器、选择可靠或不可靠投递 | [连接与消息 API](Assets/MiniNet/README.md#连接与消息-api) |
-| 定义玩家模板并同步血量 | [PlayerState 与 SpawnPlayer](Assets/MiniNet/Examples/Test.cs) |
-| 发送购买请求、验证归属、更新背包 | [客户端请求](Assets/MiniNet/Examples/Inventory.Client.cs) · [服务端处理](Assets/MiniNet/Examples/Inventory.Server.cs) |
-| 验证入队、退队及父子对象的生命周期 | [双客户端回环测试](Assets/MiniNet/Tests/GhostBindingTests.cs) |
+### 3. 同步对象状态
 
-传输层与编译期代码生成使用的第三方库及其许可见[依赖说明](Assets/MiniNet/ThirdParty/README.md)。
+```csharp
+public sealed class PlayerState : GhostComponent {
+    [GhostField] public int Hp;
+}
+```
+
+```csharp
+// 两端使用相同的模板 ID 和组件布局。
+var playerTemplate = new GhostBuilder(1).Component<PlayerState>().Build();
+
+// 客户端：在收包前注册模板。
+client.ReplicateManager.RegisterTemplate(playerTemplate);
+
+// 服务端：创建对象，之后直接修改同步字段。
+var player = server.ReplicateManager.Spawn(playerTemplate);
+player.GetComponent<PlayerState>().Hp = 100;
+```
+
+客户端可订阅 `Spawned`、`Updated` 和 `Despawned` 以更新游戏表现。服务端调用 `Despawn(player.NetId)` 后，框架会移除客户端对应的副本。
+
+## 文档与示例
+
+- [用户指南与 API 速查](Assets/MiniNet/README.md)包含可直接挂到 GameObject 上运行的本机通信示例。
+- [客户端发送请求](Assets/MiniNet/Examples/Inventory.Client.cs)和[服务端校验归属](Assets/MiniNet/Examples/Inventory.Server.cs)展示一次完整的业务交互。
+- [子对象与可见性测试](Assets/MiniNet/Tests/GhostBindingTests.cs)展示如何按连接同步部分状态。

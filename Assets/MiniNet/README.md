@@ -1,8 +1,14 @@
 # MiniNet 用户指南
 
-MiniNet 是 Unity 的服务端权威网络框架，底层使用 KCP。客户端用**消息**表达一次操作（如购买药水），服务端用 **Ghost** 同步持续状态（如金币和药水数量）。业务程序集使用 asmdef 时，请引用 `MiniNet`。连接与消息 API 位于 `MiniNet`，Ghost API 位于 `MiniNet.Replicate`。
+MiniNet 是基于 KCP 的 C# 服务端权威网络框架。运行时可在普通 .NET 程序或 Unity 中使用，由宿主驱动网络循环。客户端用**消息**表达一次操作（如购买药水），服务端用 **Ghost** 同步持续状态（如金币和药水数量）。业务程序集使用 asmdef 时，请引用 `MiniNet`。连接与消息 API 位于 `MiniNet`，Ghost API 位于 `MiniNet.Replicate`。
 
-## 快速开始：本机收发一条消息
+## 编译与序列化
+
+MiniNet 的 Unity 依赖集中在编译期 Weaver。它通过 Unity 的 IL 后处理管线为类型化消息和带 `[GhostField]` 的组件生成序列化代码。已经过 Weaver 处理的程序集可以在兼容的 .NET 运行时使用。
+
+在普通 .NET 项目中直接编译源码时，可以通过 `NetworkMessageSerializer<T>.Register(write, read)` 注册消息的读写函数，并在 Ghost 组件中覆写 `Serialize` 和 `Deserialize` 读写同步字段。原始字节收发可以直接使用。
+
+## Unity 快速开始：本机收发一条消息
 
 把下面的脚本保存为 `MiniNetDemo.cs`，挂到场景中的 GameObject 后进入 Play 模式。它复用仓库中的 `ChatMessage`，在同一进程启动两端；连接成功后，Unity Console 会打印服务端收到的消息。
 
