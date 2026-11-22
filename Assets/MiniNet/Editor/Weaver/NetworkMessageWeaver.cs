@@ -77,6 +77,8 @@ namespace MiniNet.Weaver {
             var readerDelegate = (GenericInstanceType)register.Parameters[1].ParameterType;
             bool modified = false;
             foreach (var type in GetTypes(module.Types)) {
+                modified |= WeaveGhostFields(module, type, writerDelegate.GenericArguments[0],
+                    readerDelegate.GenericArguments[0], diagnostics);
                 if (!type.Interfaces.Any(entry => entry.InterfaceType.FullName == MessageInterface) ||
                     type.Methods.Any(method => method.Name == GeneratedWriter)) {
                     continue;
@@ -108,6 +110,158 @@ namespace MiniNet.Weaver {
                 modified = true;
             }
             return modified;
+        }
+
+        private static bool WeaveGhostFields(ModuleDefinition module, TypeDefinition type,
+            TypeReference writer, TypeReference reader, List<DiagnosticMessage> diagnostics) {
+            var fields = type.Fields.Where(IsGhostField).OrderBy(field => field.Name, StringComparer.Ordinal).ToArray();
+            if (fields.Length == 0) return false;
+
+            var ghostBase = type.BaseType?.Resolve();
+            while (ghostBase != null && ghostBase.FullName != "MiniNet.Replicate.GhostComponent")
+                ghostBase = ghostBase.BaseType?.Resolve();
+            if (ghostBase == null) {
+                AddError(diagnostics, $"GhostField on {type.FullName} requires a GhostComponent.");
+                return false;
+            }
+            bool NeedsMethod(string name, TypeReference buffer) => !type.Methods.Any(m =>
+                m.Name == name && m.IsVirtual && !m.IsNewSlot && m.Parameters.Count == 2 &&
+                m.Parameters[0].ParameterType.FullName == buffer.FullName &&
+                m.Parameters[1].ParameterType.MetadataType == MetadataType.Boolean);
+            bool write = NeedsMethod("Serialize", writer);
+            bool read = NeedsMethod("Deserialize", reader);
+            if (!write && !read) return false;
+            foreach (var field in fields) {
+                if (field.IsStatic || field.IsInitOnly || GetWireType(field.FieldType) == null) {
+                    AddError(diagnostics, $"Unsupported GhostField {field.FullName}. Expected a writable primitive, enum or string instance field.");
+                    return false;
+                }
+            }
+            int offset = 0;
+            bool tracked = write && read;
+            for (var parent = type.BaseType.Resolve(); parent.FullName != ghostBase.FullName; parent = parent.BaseType.Resolve()) {
+                offset += parent.Fields.Count(IsGhostField);
+                if (parent.Methods.Any(m => m.IsVirtual && (m.Name == "Serialize" || m.Name == "Deserialize")) &&
+                    !parent.Methods.Any(m => m.Name == "DetectFieldChanges")) tracked = false;
+            }
+            if (tracked && offset + fields.Length > 64) {
+                AddError(diagnostics, $"GhostComponent {type.FullName} exceeds 64 replicated fields including inherited fields.");
+                return false;
+            }
+            if (tracked) EmitChangeDetection(module, type, ghostBase, fields, offset);
+            if (write) EmitGhostMethod(module, type, ghostBase, writer, fields, true, tracked, offset);
+            if (read) EmitGhostMethod(module, type, ghostBase, reader, fields, false, tracked, offset);
+            return true;
+        }
+
+        private static bool IsGhostField(FieldDefinition field) {
+            var marker = field.CustomAttributes.FirstOrDefault(a =>
+                a.AttributeType.FullName == "MiniNet.Replicate.GhostFieldAttribute");
+            return marker != null && !marker.Fields.Any(arg =>
+                arg.Name == "Direction" && Convert.ToInt32(arg.Argument.Value) != 0);
+        }
+
+        private static TypeReference SelfType(TypeDefinition type) {
+            if (!type.HasGenericParameters) return type;
+            var owner = new GenericInstanceType(type);
+            foreach (var parameter in type.GenericParameters) owner.GenericArguments.Add(parameter);
+            return owner;
+        }
+
+        private static void EmitChangeDetection(ModuleDefinition module, TypeDefinition type,
+            TypeDefinition root, FieldDefinition[] fields, int offset) {
+            var prototype = root.Methods.Single(m => m.Name == "DetectFieldChanges");
+            var result = module.ImportReference(prototype.ReturnType);
+            var method = new MethodDefinition(prototype.Name, MethodAttributes.FamORAssem | MethodAttributes.Virtual |
+                MethodAttributes.HideBySig, result);
+            type.Methods.Add(method);
+            var il = method.Body.GetILProcessor();
+            il.Emit(OpCodes.Ldarg_0);
+            il.Emit(OpCodes.Call, new MethodReference(method.Name, result, type.BaseType) { HasThis = true });
+            il.Emit(OpCodes.Pop);
+            var self = SelfType(type);
+            var track = module.ImportReference(root.Methods.Single(m => m.Name == "TrackField"));
+            for (int i = 0; i < fields.Length; i++) {
+                var field = fields[i];
+                var shadow = new FieldDefinition("<MiniNet>Previous_" + field.Name, FieldAttributes.Private, field.FieldType);
+                type.Fields.Add(shadow);
+                var call = new GenericInstanceMethod(track);
+                call.GenericArguments.Add(field.FieldType);
+                il.Emit(OpCodes.Ldarg_0);
+                il.Emit(OpCodes.Ldarg_0);
+                il.Emit(OpCodes.Ldflda, new FieldReference(shadow.Name, shadow.FieldType, self));
+                il.Emit(OpCodes.Ldarg_0);
+                il.Emit(OpCodes.Ldfld, new FieldReference(field.Name, field.FieldType, self));
+                il.Emit(OpCodes.Ldc_I8, 1L << (offset + i));
+                il.Emit(OpCodes.Call, call);
+            }
+            il.Emit(OpCodes.Ldtoken, self);
+            // Use the target's System.Type scope even when Unity runs the Weaver on CoreCLR.
+            var getTypeFromHandle = new MethodReference(nameof(Type.GetTypeFromHandle), result, result);
+            var handle = new TypeReference("System", "RuntimeTypeHandle", module, result.Scope, true);
+            getTypeFromHandle.Parameters.Add(new ParameterDefinition(handle));
+            il.Emit(OpCodes.Call, getTypeFromHandle);
+            il.Emit(OpCodes.Ret);
+        }
+
+        private static void EmitGhostMethod(ModuleDefinition module, TypeDefinition type, TypeDefinition root,
+            TypeReference buffer, FieldDefinition[] fields, bool writing, bool tracked, int offset) {
+            var bufferType = module.ImportReference(buffer);
+            string name = writing ? "Serialize" : "Deserialize";
+            var method = new MethodDefinition(name, MethodAttributes.Public | MethodAttributes.Virtual |
+                MethodAttributes.HideBySig, module.TypeSystem.Void);
+            method.Parameters.Add(new ParameterDefinition("buffer", ParameterAttributes.None, bufferType));
+            method.Parameters.Add(new ParameterDefinition("initialState", ParameterAttributes.None, module.TypeSystem.Boolean));
+            type.Methods.Add(method);
+            var il = method.Body.GetILProcessor();
+
+            // Call through the immediate base so inherited fields precede this type's fields.
+            var parent = new MethodReference(name, module.TypeSystem.Void, type.BaseType) { HasThis = true };
+            parent.Parameters.Add(new ParameterDefinition(bufferType));
+            parent.Parameters.Add(new ParameterDefinition(module.TypeSystem.Boolean));
+            il.Emit(OpCodes.Ldarg_0);
+            il.Emit(OpCodes.Ldarg_1);
+            il.Emit(OpCodes.Ldarg_2);
+            il.Emit(OpCodes.Call, parent);
+
+            foreach (var field in fields) {
+                var next = il.Create(OpCodes.Nop);
+                if (tracked) {
+                    var include = il.Create(OpCodes.Nop);
+                    il.Emit(OpCodes.Ldarg_2);
+                    il.Emit(OpCodes.Brtrue, include);
+                    il.Emit(OpCodes.Ldarg_0);
+                    il.Emit(OpCodes.Ldc_I8, 1L << offset++);
+                    il.Emit(OpCodes.Call, module.ImportReference(root.Methods.Single(m => m.Name == "IncludesField")));
+                    il.Emit(OpCodes.Brfalse, next);
+                    il.Append(include);
+                }
+                var wire = module.ImportReference(GetWireType(field.FieldType));
+                FieldReference member = field;
+                if (type.HasGenericParameters) {
+                    var owner = new GenericInstanceType(type);
+                    foreach (var parameter in type.GenericParameters) owner.GenericArguments.Add(parameter);
+                    member = new FieldReference(field.Name, field.FieldType, owner);
+                }
+                if (!writing) il.Emit(OpCodes.Ldarg_0);
+                il.Emit(OpCodes.Ldarg_1);
+                if (writing) {
+                    il.Emit(OpCodes.Ldarg_0);
+                    il.Emit(OpCodes.Ldfld, member);
+                }
+                if (wire.MetadataType == MetadataType.String) {
+                    string helper = writing ? "WriteGhostString" : "ReadGhostString";
+                    il.Emit(OpCodes.Call, module.ImportReference(root.Methods.Single(m => m.Name == helper)));
+                } else {
+                    var operation = new MethodReference(writing ? "Write" : "Read" + wire.Name,
+                        writing ? module.TypeSystem.Void : wire, bufferType) { HasThis = true };
+                    if (writing) operation.Parameters.Add(new ParameterDefinition(wire));
+                    il.Emit(OpCodes.Callvirt, operation);
+                }
+                if (!writing) il.Emit(OpCodes.Stfld, member);
+                if (tracked) il.Append(next);
+            }
+            il.Emit(OpCodes.Ret);
         }
 
         private static TypeReference GetWireType(TypeReference type) {

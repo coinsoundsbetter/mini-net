@@ -3,9 +3,19 @@ using System.IO;
 using System.Text;
 
 namespace MiniNet {
+    public static class NetworkProtocol {
+        /// <summary>Application-defined protocol version shared by client and server code.</summary>
+        public static uint Version { get; set; } = 1;
+    }
+
     internal static class NetworkMessages {
         internal const byte Raw = 0;
         internal const byte Typed = 1;
+        internal const byte Spawn = 2;
+        internal const byte Update = 3;
+        internal const byte Despawn = 4;
+        internal const byte OwnershipChanged = 5;
+        internal const byte SpawnChild = 6;
 
         internal static ArraySegment<byte> Pack<T>(T message) where T : struct, INetworkMessage {
             using var stream = new MemoryStream();

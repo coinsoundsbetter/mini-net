@@ -14,6 +14,10 @@ namespace MiniNet {
         public ServerState State { get; private set; }
         public ServerReplicateManager ReplicateManager { get; private set; } = new ServerReplicateManager();
 
+        public void Bind<TComponent, TImplementation>(Func<TComponent, TImplementation> create)
+            where TComponent : GhostComponent, IRequiresServerImplementation where TImplementation : class =>
+            ReplicateManager.Bind(create);
+
         public Server(TransportServer useTransport) {
             transport = useTransport ?? throw new ArgumentNullException(nameof(useTransport));
             messages = new NetworkMessageHandlers(
@@ -44,6 +48,7 @@ namespace MiniNet {
             var disconnected = new int[connections.Count];
             connections.CopyTo(disconnected);
             connections.Clear();
+            ReplicateManager.Reset();
             foreach (int id in disconnected) {
                 RemoteClientDisconnected?.Invoke(id);
             }
@@ -84,17 +89,20 @@ namespace MiniNet {
 
         public void TickOutgoing() {
             if (State == ServerState.Started) {
+                ReplicateManager.Flush(SendPacket);
                 transport.TickOutgoing();
             }
         }
 
         private void HandleClientConnected(int id) {
-            connections.Add(id);
+            if (!connections.Add(id)) return;
+            ReplicateManager.AddConnection(id);
             RemoteClientConnected?.Invoke(id);
         }
 
         private void HandleClientDisconnected(int id) {
             if (connections.Remove(id)) {
+                ReplicateManager.ForgetConnection(id);
                 RemoteClientDisconnected?.Invoke(id);
             }
         }

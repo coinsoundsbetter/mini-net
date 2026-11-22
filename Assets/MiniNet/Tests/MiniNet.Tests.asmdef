@@ -1,0 +1,6 @@
+{
+    "name": "MiniNet.Tests",
+    "references": ["MiniNet"],
+    "includePlatforms": ["Editor"],
+    "optionalUnityReferences": ["TestAssemblies"]
+}

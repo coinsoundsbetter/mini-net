@@ -15,6 +15,10 @@ namespace MiniNet {
 
         public ClientState State { get; private set; }
 
+        public void Bind<TComponent, TImplementation>(Func<TComponent, TImplementation> create)
+            where TComponent : GhostComponent, IRequiresClientImplementation where TImplementation : class =>
+            ReplicateManager.Bind(create);
+
         public Client(TransportClient useTransport) {
             transport = useTransport ?? throw new ArgumentNullException(nameof(useTransport));
             messages = new NetworkMessageHandlers(
@@ -24,8 +28,9 @@ namespace MiniNet {
                 State = ClientState.Connected;
                 OnConnected?.Invoke();
             };
-            transport.DataReceived += (payload, mode) => messages.Receive(0, payload, mode);
+            transport.DataReceived += HandlePacket;
             transport.Disconnected += () => {
+                ReplicateManager.Reset();
                 State = ClientState.Disconnected;
                 OnDisconnected?.Invoke();
             };
@@ -81,6 +86,23 @@ namespace MiniNet {
         }
 
         public void TickIncoming() => transport.TickIncoming();
+        private void HandlePacket(ArraySegment<byte> packet, DeliveryMode mode) {
+            byte kind = packet.Count == 0 ? NetworkMessages.Raw : packet.Array[packet.Offset];
+            if (kind != NetworkMessages.Spawn && kind != NetworkMessages.SpawnChild && kind != NetworkMessages.Update &&
+                kind != NetworkMessages.Despawn && kind != NetworkMessages.OwnershipChanged) {
+                messages.Receive(0, packet, mode);
+                return;
+            }
+            Ghost ghost;
+            try {
+                ghost = ReplicateManager.ReadPacket(kind, packet);
+            } catch (Exception error) when (error is System.IO.IOException || error is System.IO.InvalidDataException) {
+                Disconnect();
+                Error?.Invoke(error.Message);
+                return;
+            }
+            ReplicateManager.Notify(kind, ghost);
+        }
         public void TickOutgoing() => transport.TickOutgoing();
     }
 }
